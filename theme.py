@@ -293,6 +293,25 @@ headerbar .title {
     + """;
 }
 
+/* --- Icon-only buttons --- */
+.icon-btn {
+    background-color: transparent;
+    color: """
+    + NORD["nord4"]
+    + """;
+    border: none;
+    padding: 4px;
+    min-width: 24px;
+    min-height: 24px;
+    font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", monospace;
+    font-size: 14px;
+}
+.icon-btn:hover {
+    color: """
+    + NORD["nord8"]
+    + """;
+}
+
 /* --- Mode buttons (shuffle, repeat) --- */
 .mode-btn {
     background-color: transparent;
