@@ -256,8 +256,12 @@ class MpvBackend:
         if not os.path.isfile(filepath):
             return False
 
+        # Always stop first to ensure clean state
+        self._send_command("stop")
+        
         self.current_file = filepath
         result = self._send_command("loadfile", filepath, "replace")
+        
         if result is not None:
             self.is_playing = True
             self.is_paused = False

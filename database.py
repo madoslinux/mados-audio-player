@@ -60,7 +60,7 @@ class PlaylistDB:
 
     def _connect(self):
         """Open a connection to the SQLite database."""
-        self._conn = sqlite3.connect(self.db_path, timeout=5)
+        self._conn = sqlite3.connect(self.db_path, timeout=5, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.row_factory = sqlite3.Row
@@ -95,6 +95,32 @@ class PlaylistDB:
                     key   TEXT PRIMARY KEY,
                     value TEXT
                 );
+                
+                -- Cache de metadatos de canciones
+                CREATE TABLE IF NOT EXISTS track_metadata (
+                    filepath    TEXT PRIMARY KEY,
+                    title       TEXT,
+                    artist      TEXT,
+                    album       TEXT,
+                    duration    REAL,
+                    bitrate     TEXT,
+                    samplerate  TEXT,
+                    updated_at  REAL NOT NULL
+                );
+                
+                -- Cache de carátulas de álbumes
+                CREATE TABLE IF NOT EXISTS album_art (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    artist      TEXT NOT NULL,
+                    album       TEXT NOT NULL,
+                    image_data  BLOB NOT NULL,
+                    source      TEXT,
+                    updated_at  REAL NOT NULL,
+                    UNIQUE(artist, album)
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_album_art_lookup
+                    ON album_art(artist, album);
             """)
 
     # ─── Playlist CRUD ──────────────────────────────────────────
@@ -275,11 +301,14 @@ class PlaylistDB:
             return
 
         params.append(track_id)
-        with self._conn:
+        try:
             self._conn.execute(
                 f"UPDATE tracks SET {', '.join(updates)} WHERE id = ?",
                 params,
             )
+            self._conn.commit()
+        except Exception:
+            pass
 
     def remove_track_at(self, playlist_id, position):
         """Remove a track at a given position and reindex.
@@ -357,17 +386,23 @@ class PlaylistDB:
         return default
 
     def set_setting(self, key, value):
-        """Set a player setting.
-
+        """Store a setting.
+        
         Args:
-            key: Setting key name.
-            value: Value to store (will be converted to string).
+            key: Setting name.
+            value: Setting value (will be converted to string).
         """
-        with self._conn:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-                (key, str(value)),
-            )
+        if not self._conn:
+            return
+        
+        try:
+            with self._conn:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                    (key, str(value)),
+                )
+        except Exception:
+            pass
 
     def get_int_setting(self, key, default=0):
         """Get a setting as integer.
@@ -412,3 +447,107 @@ class PlaylistDB:
 
     def __del__(self):
         self.close()
+
+    # ─── Metadata Cache ─────────────────────────────────────────
+
+    def get_track_metadata(self, filepath):
+        """Get cached metadata for a track.
+
+        Args:
+            filepath: Path to the audio file.
+
+        Returns:
+            Dict with metadata or None if not cached.
+        """
+        row = self._conn.execute(
+            "SELECT title, artist, album, duration, bitrate, samplerate FROM track_metadata WHERE filepath = ?",
+            (filepath,)
+        ).fetchone()
+        if row:
+            return {
+                "title": row["title"],
+                "artist": row["artist"],
+                "album": row["album"],
+                "duration": row["duration"],
+                "bitrate": row["bitrate"],
+                "samplerate": row["samplerate"],
+            }
+        return None
+
+    def set_track_metadata(self, filepath, metadata):
+        """Cache metadata for a track.
+
+        Args:
+            filepath: Path to the audio file.
+            metadata: Dict with title, artist, album, duration, etc.
+        """
+        with self._conn:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO track_metadata
+                   (filepath, title, artist, album, duration, bitrate, samplerate, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    filepath,
+                    metadata.get("title", ""),
+                    metadata.get("artist", ""),
+                    metadata.get("album", ""),
+                    metadata.get("duration", 0.0),
+                    metadata.get("bitrate", ""),
+                    metadata.get("samplerate", ""),
+                    time.time(),
+                ),
+            )
+
+    # ─── Album Art Cache ──────────────────────────────────────
+
+    def get_album_art(self, artist, album):
+        """Get cached album art.
+
+        Args:
+            artist: Artist name.
+            album: Album name.
+
+        Returns:
+            Tuple (image_data, source) or (None, None) if not cached.
+        """
+        row = self._conn.execute(
+            "SELECT image_data, source FROM album_art WHERE artist = ? AND album = ?",
+            (artist, album)
+        ).fetchone()
+        if row:
+            return row["image_data"], row["source"]
+        return None, None
+
+    def set_album_art(self, artist, album, image_data, source=""):
+        """Cache album art.
+
+        Args:
+            artist: Artist name.
+            album: Album name.
+            image_data: Binary image data.
+            source: Source of the image (e.g., "itunes", "musicbrainz").
+        """
+        with self._conn:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO album_art
+                   (artist, album, image_data, source, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (artist, album, image_data, source, time.time()),
+            )
+
+    def cleanup_old_cache(self, max_age_days=30):
+        """Remove cached data older than specified days.
+
+        Args:
+            max_age_days: Maximum age in days.
+        """
+        cutoff = time.time() - (max_age_days * 24 * 60 * 60)
+        with self._conn:
+            self._conn.execute(
+                "DELETE FROM track_metadata WHERE updated_at < ?",
+                (cutoff,)
+            )
+            self._conn.execute(
+                "DELETE FROM album_art WHERE updated_at < ?",
+                (cutoff,)
+            )

@@ -13,7 +13,8 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("PangoCairo", "1.0")
-from gi.repository import Gtk, Gdk, GLib, Pango, PangoCairo
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gtk, Gdk, GLib, Pango, PangoCairo, GdkPixbuf
 
 from . import __app_id__, __app_name__, __version__
 from .backend import MpvBackend
@@ -26,111 +27,14 @@ from .translations import (
 )
 from .theme import apply_theme, NORD
 from .spectrum import SpectrumAnalyzer
+from .playlist_window import PlaylistWindow
+from .album_art import AlbumArtManager
+from .track_manager import TrackManager
 
-
-class PlaylistWindow(Gtk.Window):
-    """Separate window for playlist management."""
-
-    def __init__(self, parent_app):
-        super().__init__()
-        self.parent_app = parent_app
-        self.set_title(parent_app._t("playlist"))
-        self.set_default_size(400, 500)
-        self.set_position(Gtk.WindowPosition.CENTER)
-        self.set_transient_for(parent_app.window)
-        self.set_wmclass(__app_id__, __app_name__)
-        self.set_role(f"{__app_id__}_playlist")
-
-        self._build_ui()
-        self._refresh_view()
-
-    def _build_ui(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self.add(box)
-
-        toolbar = Gtk.HeaderBar()
-        toolbar.set_show_close_button(True)
-        self.set_titlebar(toolbar)
-
-        clear_btn = Gtk.Button()
-        clear_btn.add(Gtk.Label(label="\U000f01b4"))
-        clear_btn.set_tooltip_text(self.parent_app._t("clear_playlist"))
-        clear_btn.connect("clicked", self._on_clear_clicked)
-        toolbar.pack_start(clear_btn)
-
-        box.pack_start(self._build_playlist_view(), True, True, 0)
-
-    def _build_playlist_view(self):
-        self.store = Gtk.ListStore(int, str, str, str)
-        self.view = Gtk.TreeView(model=self.store)
-        self.view.set_headers_visible(False)
-        self.view.connect("row-activated", self._on_row_activated)
-        self.view.connect("button-press-event", self._on_view_button_press)
-
-        col = Gtk.TreeViewColumn()
-        self.view.append_column(col)
-
-        renderer = Gtk.CellRendererBox()
-        renderer.set_orientation(Gtk.Orientation.HORIZONTAL)
-        col.add_attribute(renderer, "text", 1)
-
-        scroll = Gtk.ScrolledWindow()
-        scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scroll.add(self.view)
-
-        return scroll
-
-    def _on_view_button_press(self, view, event):
-        if event.button == 3:
-            path = view.get_path_at_pos(int(event.x), int(event.y))
-            if path:
-                self._show_context_menu(path[0], int(event.x), int(event.y))
-                return True
-        return False
-
-    def _show_context_menu(self, path, x, y):
-        menu = Gtk.Menu()
-        remove_item = Gtk.MenuItem(label=self.parent_app._t("remove"))
-        remove_item.connect("activate", self._on_remove_track, path.get_indices()[0])
-        menu.append(remove_item)
-        menu.attach_to_widget(self.view, None)
-        menu.popup(None, None, None, None, 3, Gtk.get_current_event_time())
-
-    def _on_remove_track(self, item, index):
-        self.parent_app.playlist.remove_index(index)
-        self._refresh_view()
-
-    def _on_row_activated(self, treeview, path, column):
-        index = path.get_indices()[0]
-        self.parent_app.playlist.set_current(index)
-        self.parent_app._play_current()
-        self.parent_app._update_playlist_highlight()
-
-    def _on_clear_clicked(self, button):
-        self.parent_app.backend.stop()
-        self.parent_app.playlist.clear()
-        self._refresh_view()
-        self.parent_app._marquee_text = __app_name__
-        self.parent_app._marquee_offset = 0
-        self.parent_app.title_area.queue_draw()
-        self.parent_app.artist_label.set_text("")
-        self.parent_app._update_status(self.parent_app._t("ready"))
-
-    def _refresh_view(self):
-        self.store.clear()
-        for i, track in enumerate(self.parent_app.playlist.tracks):
-            is_current = i == self.parent_app.playlist.current_index
-            name = f"▶ {track.display_name()}" if is_current else track.display_name()
-            dur = format_time(track.duration) if track.duration > 0 else ""
-            self.store.append([i + 1, name, dur, track.filepath])
-
-    def remove_track(self, index):
-        self.parent_app.playlist.remove_index(index)
-        self._refresh_view()
 
 
 class AudioPlayerApp:
-    UPDATE_INTERVAL_MS = 250
+    UPDATE_INTERVAL_MS = 16
 
     def __init__(self, files=None):
         self.language = detect_system_language()
@@ -143,11 +47,18 @@ class AudioPlayerApp:
         self._prev_btn = None
         self._play_btn = None
         self._next_btn = None
+        self._album_pixbuf = None
+        self._resize_timeout_id = None
 
         self.backend = MpvBackend()
         self.playlist = Playlist()
         self.spectrum = SpectrumAnalyzer()
         self.playlist_window = None
+        self.album_art_manager = AlbumArtManager(self)
+        
+        # Usar el nuevo track manager para metadata
+        from .metadata_cache import MetadataCache
+        self.track_manager = TrackManager()
 
         apply_theme()
 
@@ -191,6 +102,7 @@ class AudioPlayerApp:
         self.window.connect("destroy", self._on_destroy)
         self.window.connect("motion-notify-event", self._on_mouse_motion)
         self.window.connect("leave-notify-event", self._on_mouse_leave)
+        self.window.connect("configure-event", self._on_window_resize)
 
         self.window.drag_dest_set(
             Gtk.DestDefaults.ALL, [Gtk.TargetEntry.new("text/uri-list", 0, 0)], Gdk.DragAction.COPY
@@ -207,11 +119,20 @@ class AudioPlayerApp:
         main_overlay = Gtk.Overlay()
         self.window.add(main_overlay)
 
+        bg_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        bg_box.set_homogeneous(False)
+        main_overlay.add(bg_box)
+
         drawing_area = Gtk.DrawingArea()
+        drawing_area.set_hexpand(True)
+        drawing_area.set_vexpand(True)
         drawing_area.connect("draw", self._on_background_draw)
-        main_overlay.add(drawing_area)
+        bg_box.pack_start(drawing_area, True, True, 0)
+        self._drawing_area = drawing_area
 
         self._controls_container = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._controls_container.set_halign(Gtk.Align.FILL)
+        self._controls_container.set_hexpand(True)
         self._controls_container.set_margin_start(20)
         self._controls_container.set_margin_end(20)
         self._controls_container.set_margin_top(20)
@@ -222,41 +143,68 @@ class AudioPlayerApp:
 
         self._controls_container.pack_start(self._build_title_area(), False, False, 0)
 
-        self._controls_container.pack_start(Gtk.Box(), True, True, 0)
+        # Espacio entre info y album art
+        spacer = Gtk.Box()
+        spacer.set_size_request(-1, 10)
+        self._controls_container.pack_start(spacer, False, False, 0)
+
+        # Usar DrawingArea para el album art para control total del escalado
+        self._album_cover_centered = Gtk.DrawingArea()
+        self._album_cover_centered.set_size_request(50, 50)
+        self._album_cover_centered.set_hexpand(True)
+        self._album_cover_centered.set_vexpand(True)
+        self._album_cover_centered.connect("draw", self.album_art_manager.on_draw)
+        self._controls_container.pack_start(self._album_cover_centered, True, True, 0)
 
         self._player_controls = self._build_overlay_controls()
         self._controls_container.pack_start(self._player_controls, False, False, 0)
 
     def _build_title_area(self):
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        
+        # Fila 1: Tiempo + tiempo total (alineados horizontalmente)
+        time_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        time_box.set_halign(Gtk.Align.START)
+        
         self.time_label = Gtk.Label(label="0:00")
         self.time_label.get_style_context().add_class("time-display")
-        self.time_label.set_halign(Gtk.Align.START)
-        box.pack_start(self.time_label, False, False, 4)
+        self.time_label.set_valign(Gtk.Align.CENTER)
+        time_box.pack_start(self.time_label, False, False, 0)
 
-        box.pack_start(Gtk.Box(), True, True, 0)
+        self.time_total_label = Gtk.Label(label="/ 0:00")
+        self.time_total_label.get_style_context().add_class("time-display")
+        self.time_total_label.set_valign(Gtk.Align.CENTER)
+        self.time_total_label.set_margin_top(3)
+        time_box.pack_start(self.time_total_label, False, False, 0)
+        
+        box.pack_start(time_box, False, False, 0)
 
+        # Fila 2: Título
         self.title_area = Gtk.DrawingArea()
-        self.title_area.set_size_request(-1, 40)
-        self.title_area.set_margin_start(8)
-        self.title_area.set_margin_end(8)
+        self.title_area.set_size_request(-1, 32)
+        self.title_area.set_margin_start(2)
+        self.title_area.set_margin_end(2)
         self.title_area.connect("draw", self._on_title_draw)
-        box.pack_start(self.title_area, True, True, 0)
+        box.pack_start(self.title_area, False, False, 0)
 
-        box.pack_start(Gtk.Box(), True, True, 0)
-
+        # Fila 3: Artista
         self.artist_label = Gtk.Label(label="")
         self.artist_label.get_style_context().add_class("track-artist")
-        self.artist_label.set_halign(Gtk.Align.END)
+        self.artist_label.set_halign(Gtk.Align.START)
         self.artist_label.set_ellipsize(Pango.EllipsizeMode.END)
-        box.pack_start(self.artist_label, False, False, 4)
+        box.pack_start(self.artist_label, False, False, 0)
+
+        # Info de bitrate
+        self.bitrate_label = Gtk.Label(label="")
+        self.bitrate_label.get_style_context().add_class("info-label")
+        self.bitrate_label.set_halign(Gtk.Align.START)
+        box.pack_start(self.bitrate_label, False, False, 0)
 
         self._marquee_text = __app_name__
         self._marquee_offset = 0
         self._marquee_separator = "    ///    "
         self._tick_count = 0
-        self._marquee_timer_id = GLib.timeout_add(33, self._on_marquee_tick)
+        self._marquee_timer_id = GLib.timeout_add(16, self._on_marquee_tick)
 
         return box
 
@@ -320,9 +268,9 @@ class AudioPlayerApp:
 
         return self._controls_box
 
-    def _build_hamburger_menu(self):
+    def _on_menu_clicked(self, button):
         menu = Gtk.Menu()
-
+        
         add_files_item = Gtk.MenuItem(label=self._t("add_files"))
         add_files_item.connect("activate", self._on_add_files_clicked)
         menu.append(add_files_item)
@@ -333,7 +281,9 @@ class AudioPlayerApp:
 
         menu.append(Gtk.SeparatorMenuItem())
 
+        # Shuffle con estado actual
         shuffle_item = Gtk.CheckMenuItem(label=self._t("shuffle"))
+        shuffle_item.set_active(self.playlist.shuffle)
         shuffle_item.connect("toggled", self._on_shuffle_toggled)
         menu.append(shuffle_item)
 
@@ -351,6 +301,14 @@ class AudioPlayerApp:
         repeat_one_item = Gtk.RadioMenuItem.new_with_label([repeat_off_item], self._t("repeat_one"))
         repeat_one_item.connect("toggled", self._on_repeat_mode_toggled, REPEAT_ONE)
         repeat_submenu.append(repeat_one_item)
+        
+        # Establecer el estado actual del repeat
+        if self.playlist.repeat_mode == REPEAT_OFF:
+            repeat_off_item.set_active(True)
+        elif self.playlist.repeat_mode == REPEAT_ALL:
+            repeat_all_item.set_active(True)
+        elif self.playlist.repeat_mode == REPEAT_ONE:
+            repeat_one_item.set_active(True)
 
         repeat_item.set_submenu(repeat_submenu)
         menu.append(repeat_item)
@@ -361,50 +319,13 @@ class AudioPlayerApp:
         playlist_item.connect("activate", self._on_view_playlist_clicked)
         menu.append(playlist_item)
 
-        return menu
-
-    def _on_menu_clicked(self, button):
-        if hasattr(self, '_menu_popover') and self._menu_popover:
-            self._menu_popover.popdown()
-            self._menu_popover = None
-            return
-        
-        self._menu_popover = Gtk.Popover()
-        self._menu_popover.set_relative_to(button)
-        
-        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        vbox.set_size_request(180, -1)
-        
-        add_files_btn = Gtk.ModelButton(label=self._t("add_files"))
-        add_files_btn.connect("clicked", lambda b: (self._menu_popover.popdown(), self._on_add_files_clicked(None)))
-        vbox.pack_start(add_files_btn, False, False, 0)
-        
-        add_folder_btn = Gtk.ModelButton(label=self._t("add_folder"))
-        add_folder_btn.connect("clicked", lambda b: (self._menu_popover.popdown(), self._on_add_folder_clicked(None)))
-        vbox.pack_start(add_folder_btn, False, False, 0)
-        
-        vbox.pack_start(Gtk.Separator(), False, False, 4)
-        
-        shuffle_btn = Gtk.ModelButton(label=self._t("shuffle"))
-        shuffle_btn.connect("clicked", lambda b: (self._menu_popover.popdown(), self._on_shuffle_toggled(None)))
-        vbox.pack_start(shuffle_btn, False, False, 0)
-        
-        repeat_btn = Gtk.ModelButton(label=self._t("repeat"))
-        repeat_btn.connect("clicked", lambda b: (self._menu_popover.popdown(), self._cycle_repeat()))
-        vbox.pack_start(repeat_btn, False, False, 0)
-        
-        vbox.pack_start(Gtk.Separator(), False, False, 4)
-        
-        playlist_btn = Gtk.ModelButton(label=self._t("view_playlist"))
-        playlist_btn.connect("clicked", lambda b: (self._menu_popover.popdown(), self._on_view_playlist_clicked(None)))
-        vbox.pack_start(playlist_btn, False, False, 0)
-        
-        self._menu_popover.add(vbox)
-        self._menu_popover.show_all()
-        self._menu_popover.popup()
+        menu.show_all()
+        menu.attach_to_widget(self._menu_btn, None)
+        menu.popup(None, None, None, None, 0, Gtk.get_current_event_time())
 
     def _on_shuffle_toggled(self, item):
         self.playlist.toggle_shuffle()
+        self._update_status(f"Shuffle: {'ON' if self.playlist.shuffle else 'OFF'}")
 
     def _cycle_repeat(self):
         mode = self.playlist.cycle_repeat()
@@ -564,6 +485,7 @@ class AudioPlayerApp:
                 files.append(path)
         if files:
             self._add_files_to_playlist(files)
+            
             if not self.backend.is_playing and not self.playlist.is_empty:
                 if self.playlist.current_index < 0:
                     self.playlist.set_current(0)
@@ -573,12 +495,42 @@ class AudioPlayerApp:
         track = self.playlist.get_current_track()
         if not track:
             return
+        
+        # Verificar que el archivo existe
+        if not os.path.isfile(track.filepath):
+            return
+        
+        # Reset flags for new track
+        self._album_art_loaded = False
+        if hasattr(self, 'album_art_manager'):
+            self.album_art_manager.show_placeholder()
+        self._album_cover_centered.queue_draw()
+        
+        # Usar track_manager para obtener metadata cacheada
+        cached_meta = self.track_manager.get_metadata(track.filepath)
+        
+        if cached_meta:
+            track.title = cached_meta.get("title", track.title)
+            track.artist = cached_meta.get("artist", "")
+            track.album = cached_meta.get("album", "")
+            self.backend.metadata = cached_meta
+        
+        # Reproducir
         success = self.backend.play_file(track.filepath)
+        
         if success:
             self.play_btn.get_child().set_text("\U000f03e4")
             self._update_track_display(track)
             self._update_playlist_highlight()
             self._update_status(self._t("playing"))
+            
+            # Cargar album art en background
+            artist = cached_meta.get("artist") if cached_meta else ""
+            title = cached_meta.get("title") if cached_meta else track.title
+            album = cached_meta.get("album") if cached_meta else ""
+            
+            if artist or title:
+                self.album_art_manager.load_album_art(track.filepath, artist, title, album)
 
     def _on_update_tick(self):
         if not self.backend.is_playing and not self.backend.is_paused:
@@ -587,21 +539,39 @@ class AudioPlayerApp:
             return True
 
         self.backend.update_state()
+        
+        self.spectrum.update()
+        if hasattr(self, '_drawing_area'):
+            self._drawing_area.queue_draw()
 
         if not self._seeking and self.backend.duration > 0:
             fraction = (self.backend.position / self.backend.duration) * 100
             self.seek_scale.set_value(fraction)
             self.time_label.set_text(format_time(self.backend.position))
+            self.time_total_label.set_text(f"/ {format_time(self.backend.duration)}")
 
+        # Solo actualizar display - NO sobrescribir metadata con mpv
         meta = self.backend.get_formatted_metadata()
         current_track = self.playlist.get_current_track()
-        if current_track and meta.get("title"):
-            self.playlist.update_track_metadata(current_track, meta)
+        
+        # Mostrar metadata (preferir la cacheada, si no está usar mpv)
+        if current_track:
             self._update_track_display(current_track)
 
         if current_track and self.backend.duration > 0:
             self.playlist.update_track_duration(current_track, self.backend.duration)
             self._update_playlist_highlight()
+
+        info = self.backend.get_audio_info()
+        if info.get("bitrate") or info.get("samplerate"):
+            parts = []
+            if info.get("bitrate"):
+                parts.append(info["bitrate"])
+            if info.get("samplerate"):
+                parts.append(info["samplerate"])
+            self.bitrate_label.set_text(" | ".join(parts))
+        else:
+            self.bitrate_label.set_text("")
 
         if self.backend.is_track_finished():
             self._on_track_finished()
@@ -609,6 +579,7 @@ class AudioPlayerApp:
         return True
 
     def _on_track_finished(self):
+        self._album_art_loaded = False
         track = self.playlist.next_track()
         if track:
             self._play_current()
@@ -616,38 +587,251 @@ class AudioPlayerApp:
             self._on_stop_clicked(None)
 
     def _update_track_display(self, track):
-        new_text = track.title or self._t("unknown_title")
-        if new_text != self._marquee_text:
-            self._marquee_text = new_text
+        # Usar metadata DEL TRACK (preferir cache), no de mpv
+        if track.artist or track.title:
+            # Usar metadata cacheada del track
+            meta = {
+                "title": track.title or "",
+                "artist": track.artist or "",
+                "album": track.album or "",
+            }
+        else:
+            # Fallback a mpv si el track no tiene metadata
+            meta = self.backend.get_formatted_metadata()
+        
+        self._update_metadata_display(meta)
+    
+    def _update_metadata_display(self, meta):
+        """Actualiza el display de metadata (título, artista, album)."""
+        # Título
+        title = meta.get("title") or ""
+        if title and title != self._marquee_text:
+            self._marquee_text = title
             self._marquee_offset = 0
-        if track.artist:
-            self.artist_label.set_text(f"{track.artist}" + (f" — {track.album}" if track.album else ""))
+        
+        # Artista y Album
+        artist = meta.get("artist") or ""
+        album = meta.get("album") or ""
+        
+        if artist:
+            self.artist_label.set_text(f"{artist}" + (f" — {album}" if album else ""))
         else:
             self.artist_label.set_text("")
+    
+    def _show_album_placeholder(self):
+        """Muestra placeholder del album art."""
+        self._album_pixbuf = None
+        self.album_art_manager.show_placeholder()
+    
+    def _update_album_art_size(self, max_size=None):
+        """Actualiza el tamaño del album art manteniendo proporción."""
+        if not hasattr(self, '_album_pixbuf') or not self._album_pixbuf:
+            return
+        
+        if hasattr(self, 'album_art_manager'):
+            self.album_art_manager.update_album_size(max_size)
+        self._album_cover_centered.queue_draw()
+
+    def _on_album_draw(self, widget, cr):
+        """Dibuja el album art escalado proporcionalmente."""
+        alloc = widget.get_allocation()
+        width = alloc.width
+        height = alloc.height
+        
+        if width <= 0 or height <= 0:
+            return False
+        
+        # Fondo transparente
+        cr.set_source_rgba(0, 0, 0, 0)
+        cr.paint()
+        
+        if hasattr(self, '_album_pixbuf') and self._album_pixbuf:
+            orig_width = self._album_pixbuf.get_width()
+            orig_height = self._album_pixbuf.get_height()
+            
+            # Calcular escala manteniendo proporción
+            scale_w = width / orig_width
+            scale_h = height / orig_height
+            scale = min(scale_w, scale_h)
+            
+            # Calcular nuevo tamaño
+            new_width = orig_width * scale
+            new_height = orig_height * scale
+            
+            # Centrar la imagen
+            x = (width - new_width) / 2
+            y = (height - new_height) / 2
+            
+            # Escalar y dibujar
+            cr.save()
+            cr.translate(x, y)
+            cr.scale(scale, scale)
+            Gdk.cairo_set_source_pixbuf(cr, self._album_pixbuf, 0, 0)
+            cr.paint_with_alpha(0.5)
+            cr.restore()
+        else:
+            # Dibujar placeholder
+            self._draw_album_placeholder_cairo(cr, width, height)
+        
+        return False
+    
+    def _draw_album_placeholder_cairo(self, cr, width, height):
+        """Dibuja el placeholder del album art."""
+        size = min(width, height)
+        if size <= 0:
+            return
+        
+        # Centrar
+        x = (width - size) / 2
+        y = (height - size) / 2
+        
+        # Fondo oscuro
+        cr.set_source_rgba(0.12, 0.14, 0.18, 0.3)
+        cr.rectangle(x, y, size, size)
+        cr.fill()
+        
+        # Borde sutil
+        cr.set_source_rgba(0.3, 0.35, 0.4, 0.2)
+        cr.set_line_width(1)
+        cr.rectangle(x + 0.5, y + 0.5, size - 1, size - 1)
+        cr.stroke()
 
     def _update_status(self, text):
         pass
 
     def _on_mouse_motion(self, widget, event):
-        self._show_overlay()
+        pass
 
     def _on_mouse_leave(self, widget, event):
-        self._hide_overlay()
+        pass
+
+    def _on_window_resize(self, widget, event):
+        width = event.width
+        height = event.height
+        
+        # Ajustar márgenes y controles inmediatamente (sin debounce)
+        if hasattr(self, '_controls_container'):
+            # Márgenes horizontales según ancho
+            if width < 150:
+                margin_h = 2
+            elif width < 250:
+                margin_h = 5
+            elif width < 350:
+                margin_h = 10
+            elif width < 500:
+                margin_h = 15
+            else:
+                margin_h = 20
+            
+            # Márgenes verticales según altura
+            if height < 200:
+                margin_v = 2
+            elif height < 300:
+                margin_v = 5
+            elif height < 400:
+                margin_v = 10
+            else:
+                margin_v = 15
+            
+            self._controls_container.set_margin_start(margin_h)
+            self._controls_container.set_margin_end(margin_h)
+            self._controls_container.set_margin_top(margin_v)
+            self._controls_container.set_margin_bottom(margin_v)
+        
+        # Ajustar tipografía y controles según el ancho (inmediato)
+        if width < 200:
+            self.seek_scale.hide()
+            self.volume_scale.hide()
+            self.volume_icon.hide()
+            self._title_font_size = 8
+        elif width < 250:
+            self.seek_scale.hide()
+            self.volume_scale.hide()
+            self.volume_icon.hide()
+            self._title_font_size = 9
+        elif width < 300:
+            self.seek_scale.hide()
+            self.volume_scale.hide()
+            self.volume_icon.hide()
+            self._title_font_size = 10
+        elif width < 350:
+            self.seek_scale.hide()
+            self.volume_scale.hide()
+            self.volume_icon.hide()
+            self._title_font_size = 11
+        elif width < 400:
+            self.seek_scale.hide()
+            self.volume_scale.hide()
+            self.volume_icon.hide()
+            self._title_font_size = 12
+        elif width < 450:
+            self.seek_scale.hide()
+            self.volume_scale.show()
+            self.volume_icon.show()
+            self._title_font_size = 14
+        elif width < 550:
+            self.seek_scale.show()
+            self.volume_scale.show()
+            self.volume_icon.show()
+            self._title_font_size = 16
+        else:
+            self.seek_scale.show()
+            self.volume_scale.show()
+            self.volume_icon.show()
+            self._title_font_size = 20
+            
+        if hasattr(self, 'title_area'):
+            self.title_area.queue_draw()
+        
+        # Cancelar timeout anterior del album art si existe
+        if self._resize_timeout_id:
+            GLib.source_remove(self._resize_timeout_id)
+        
+        # Programar actualización del album art después de 100ms para evitar lag
+        self._resize_timeout_id = GLib.timeout_add(100, self._do_album_resize, width, height)
+    
+    def _do_album_resize(self, width, height):
+        """Actualiza el tamaño del album art después del resize."""
+        self._resize_timeout_id = None
+        
+        # Calcular tamaño máximo del album art (50% de la altura)
+        max_album_size = int(height * 0.5)
+        
+        if hasattr(self, '_album_cover_centered'):
+            # Establecer tamaño máximo - usar -1 para permitir reducción
+            self._album_cover_centered.set_size_request(-1, -1)
+            # Forzar redimensionamiento del album art
+            if hasattr(self, '_album_pixbuf') and self._album_pixbuf:
+                self._update_album_art_size(max_album_size)
+            else:
+                # Si no hay album art, actualizar placeholder
+                self._show_album_placeholder()
+        
+        return False
+
+    _title_font_size = 20
 
     def _show_overlay(self):
         self._overlay_visible = True
         self._player_controls.set_opacity(1)
 
     def _hide_overlay(self):
-        self._overlay_visible = False
-        self._player_controls.set_opacity(0)
+        self._overlay_visible = True
+        self._player_controls.set_opacity(1)
 
     def _on_overlay_draw(self, widget, cr):
         alloc = widget.get_allocation()
         w = alloc.width
         h = alloc.height
-        cr.set_source_rgba(22 / 255, 26 / 255, 33 / 255, 0.7)
-        cr.paint()
+        radius = 15
+        cr.set_source_rgba(22 / 255, 26 / 255, 33 / 255, 0.5)
+        cr.new_sub_path()
+        cr.arc(w - radius, radius, radius, -1.5708, 0)
+        cr.arc(w - radius, h - radius, radius, 0, 1.5708)
+        cr.arc(radius, h - radius, radius, 1.5708, 3.14159)
+        cr.arc(radius, radius, radius, 3.14159, 4.71239)
+        cr.close_path()
+        cr.fill()
         return False
 
     def _on_background_draw(self, widget, cr):
@@ -702,7 +886,7 @@ class AudioPlayerApp:
                 else:
                     r, g, b = colors_rgb["red"]
 
-                alpha = 0.06 + 0.08 * (seg / max(1, max_segments))
+                alpha = 0.4 + 0.4 * (seg / max(1, max_segments))
                 cr.set_source_rgba(r, g, b, alpha)
                 cr.rectangle(x, y, bar_w, led_h)
                 cr.fill()
@@ -725,7 +909,7 @@ class AudioPlayerApp:
             else:
                 r, g, b = colors_rgb["red"]
 
-            cr.set_source_rgba(r, g, b, 0.2)
+            cr.set_source_rgba(r, g, b, 0.8)
             cr.rectangle(x, y, bar_w, led_h)
             cr.fill()
 
@@ -745,7 +929,8 @@ class AudioPlayerApp:
         height = alloc.height
 
         layout = PangoCairo.create_layout(cr)
-        font_desc = Pango.FontDescription.from_string("Doto 20")
+        font_size = getattr(self, '_title_font_size', 16)
+        font_desc = Pango.FontDescription.from_string(f"Michroma {font_size}")
         layout.set_font_description(font_desc)
 
         text = self._marquee_text
@@ -753,7 +938,8 @@ class AudioPlayerApp:
         text_width, text_height = layout.get_pixel_size()
 
         r, g, b = 136 / 255, 192 / 255, 208 / 255
-        y = (height - text_height) / 2
+        # Center vertically with a slight offset for optical alignment
+        y = (height - text_height) / 2 + 1
 
         if text_width <= width:
             cr.save()
@@ -810,6 +996,7 @@ class AudioPlayerApp:
         Gtk.main_quit()
 
     def _cleanup(self):
+        # Detener timers primero
         if self._update_timer_id:
             GLib.source_remove(self._update_timer_id)
             self._update_timer_id = None
@@ -818,6 +1005,13 @@ class AudioPlayerApp:
             self._marquee_timer_id = None
         if self._overlay_timeout_id:
             GLib.source_remove(self._overlay_timeout_id)
+            self._overlay_timeout_id = None
+        
+        # Cerrar componentes que usan la database
         self.spectrum.stop()
+        
+        # Cerrar playlist (guarda estado en DB)
         self.playlist.close()
+        
+        # Limpiar backend
         self.backend.cleanup()
