@@ -6,8 +6,8 @@ Orchestrates track playback, metadata fetching, and caching.
 This is a pure logic module with no GTK dependencies.
 """
 
-from metadata_fetcher import MetadataFetcher
-from metadata_cache import MetadataCache
+from .metadata_fetcher import MetadataFetcher
+from .metadata_cache import MetadataCache
 
 
 class TrackManager:
