@@ -118,8 +118,8 @@ headerbar .title {
     color: """
     + NORD["nord9"]
     + """;
-    font-family: "JetBrains Mono Nerd Font", "JetBrainsMono Nerd Font", monospace;
-    font-size: 10px;
+    font-family: "Michroma", "JetBrains Mono Nerd Font", "JetBrainsMono Nerd Font", monospace;
+    font-size: 12px;
 }
 .track-info {
     color: """
@@ -130,18 +130,11 @@ headerbar .title {
 }
 .time-display {
     color: #ff3366;
-    font-family: "DSEG7 Classic", "JetBrainsMono Nerd Font", monospace;
-    font-size: 26px;
+    font-family: "dseg14", "DSEG7 Classic", "JetBrainsMono Nerd Font", monospace;
+    font-size: 20px;
     font-weight: 700;
     letter-spacing: 1.5px;
-    text-shadow:
-        0 0 8px #ff3366,
-        0 0 12px #ff3366,
-        0 0 16px rgba(255, 51, 102, 0.8),
-        0 0 20px rgba(255, 51, 102, 0.5);
-    background: linear-gradient(135deg, rgba(255, 51, 102, 0.08), rgba(220, 30, 80, 0.04));
-    border-radius: 4px;
-    padding: 2px 8px;
+    text-shadow: 0 0 4px #ff3366;
 }
 .time-total {
     color: #ff3366;
