@@ -9,8 +9,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Pango
 
-from .translations import get_text
-from .playlist import format_time
+from translations import get_text
+from playlist import format_time
 
 
 class PlaylistWindow(Gtk.Window):
@@ -25,7 +25,7 @@ class PlaylistWindow(Gtk.Window):
         self.set_transient_for(parent_app.window)
         
         # Import app constants
-        from . import __app_id__, __app_name__
+        from __init__ import __app_id__, __app_name__
         self.set_wmclass(__app_id__, __app_name__)
         self.set_role(f"{__app_id__}_playlist")
 

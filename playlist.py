@@ -17,7 +17,7 @@ import math
 import os
 import random
 
-from .database import PlaylistDB, DEFAULT_PLAYLIST
+from database import PlaylistDB, DEFAULT_PLAYLIST
 
 
 # Repeat modes
@@ -279,7 +279,7 @@ class Playlist:
             Number of tracks added.
         """
         if audio_extensions is None:
-            from .backend import MpvBackend
+            from backend import MpvBackend
 
             audio_extensions = MpvBackend.AUDIO_EXTENSIONS
 

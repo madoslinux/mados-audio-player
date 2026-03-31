@@ -7,8 +7,8 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
-    from .track_manager import TrackManager
-    from .metadata_cache import MetadataCache
+    from track_manager import TrackManager
+    from metadata_cache import MetadataCache
 except ImportError:
     from track_manager import TrackManager
     from metadata_cache import MetadataCache

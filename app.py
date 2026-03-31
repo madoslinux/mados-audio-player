@@ -16,20 +16,20 @@ gi.require_version("PangoCairo", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import Gtk, Gdk, GLib, Pango, PangoCairo, GdkPixbuf
 
-from . import __app_id__, __app_name__, __version__
-from .backend import MpvBackend
-from .playlist import Playlist, Track, format_time, REPEAT_OFF, REPEAT_ALL, REPEAT_ONE
-from .translations import (
+from __init__ import __app_id__, __app_name__, __version__
+from backend import MpvBackend
+from playlist import Playlist, Track, format_time, REPEAT_OFF, REPEAT_ALL, REPEAT_ONE
+from translations import (
     TRANSLATIONS,
     DEFAULT_LANGUAGE,
     get_text,
     detect_system_language,
 )
-from .theme import apply_theme, NORD
-from .spectrum import SpectrumAnalyzer
-from .playlist_window import PlaylistWindow
-from .album_art import AlbumArtManager
-from .track_manager import TrackManager
+from theme import apply_theme, NORD
+from spectrum import SpectrumAnalyzer
+from playlist_window import PlaylistWindow
+from album_art import AlbumArtManager
+from track_manager import TrackManager
 
 
 
@@ -57,7 +57,7 @@ class AudioPlayerApp:
         self.album_art_manager = AlbumArtManager(self)
         
         # Usar el nuevo track manager para metadata
-        from .metadata_cache import MetadataCache
+        from metadata_cache import MetadataCache
         self.track_manager = TrackManager()
 
         apply_theme()

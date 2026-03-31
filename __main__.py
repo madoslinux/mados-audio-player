@@ -15,7 +15,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk
 
-from .app import AudioPlayerApp
+from app import AudioPlayerApp
 
 
 def main():
